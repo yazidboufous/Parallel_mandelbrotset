@@ -81,7 +81,7 @@ int main() {
       AVG += total_time[k];
     }
 
-    save_pgm("mandelbrot.pgm", image);
+    save_pgm("mandelbrotseq.pgm", image);
     printf("The average execution time of 10 trials is: %f seconds", AVG/N);
 
 
