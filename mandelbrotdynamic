@@ -1,0 +1,147 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <mpi.h>
+#include <time.h>
+
+#define WIDTH 640
+#define HEIGHT 480
+#define MAX_ITER 255
+#define CHUNK_SIZE 100
+
+struct complex {
+    double real;
+    double imag;
+};
+
+int cal_pixel(struct complex c) {
+
+
+            double z_real = 0;
+            double z_imag = 0;
+
+            double z_real2, z_imag2, lengthsq;
+
+            int iter = 0;
+            do {
+                z_real2 = z_real * z_real;
+                z_imag2 = z_imag * z_imag;
+
+                z_imag = 2 * z_real * z_imag + c.imag;
+                z_real = z_real2 - z_imag2 + c.real;
+                lengthsq =  z_real2 + z_imag2;
+                iter++;
+            }
+            while ((iter < MAX_ITER) && (lengthsq < 4.0));
+
+            return iter;
+
+}
+void generate_mandelbrot(int start_row, int end_row, int* chunk) {
+    int i, j;
+    int index = 0;
+    for (i = start_row; i < end_row; i++) {
+        for (j = 0; j < WIDTH; j++) {
+            double x = (j - WIDTH / 2.0) * 4.0 / WIDTH;
+            double y = (i - HEIGHT / 2.0) * 4.0 / HEIGHT;
+
+            double z_real = x;
+            double z_imag = y;
+
+            int iter;
+            for (iter = 0; iter < MAX_ITER; iter++) {
+                double z_real2 = z_real * z_real;
+                double z_imag2 = z_imag * z_imag;
+                if (z_real2 + z_imag2 > 4.0)
+                    break;
+                z_imag = 2 * z_real * z_imag + y;
+                z_real = z_real2 - z_imag2 + x;
+            }
+
+            chunk[index++] = iter;
+        }
+    }
+}
+
+void save_pgm(const char *filename, int image[HEIGHT][WIDTH]) {
+    FILE* pgmimg;
+    pgmimg = fopen(filename, "wb");
+    fprintf(pgmimg, "P2\n"); // Writing Magic Number to the File
+    fprintf(pgmimg, "%d %d\n", WIDTH, HEIGHT);  // Writing Width and Height
+    fprintf(pgmimg, "255\n");  // Writing the maximum gray value
+
+    for (int i = 0; i < HEIGHT; i++) {
+        for (int j = 0; j < WIDTH; j++) {
+            fprintf(pgmimg, "%d ", image[i][j]); // Writing the gray values in the 2D array to the file
+        }
+        fprintf(pgmimg, "\n");
+    }
+    fclose(pgmimg);
+}
+
+
+int main() {
+    MPI_Init(NULL, NULL);
+
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    int image[HEIGHT][WIDTH];
+    double start_time, end_time;
+
+    if (rank == 0) { 
+        start_time = MPI_Wtime();
+        
+        int row = 0;
+        while (row < HEIGHT) {
+            MPI_Status status;
+            int buffer[CHUNK_SIZE * WIDTH];
+            
+            // Check for available workers and send them chunks
+            for (int i = 1; i < size && row < HEIGHT; i++) {
+                MPI_Send(&row, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+                row += CHUNK_SIZE;
+                if (row > HEIGHT) row = HEIGHT; // Adjust to not exceed HEIGHT
+            }
+
+            // Receive results from workers and assign new rows
+            for (int i = 1; i < size && row < HEIGHT; i++) {
+                MPI_Recv(buffer, CHUNK_SIZE * WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                int start_row = status.MPI_TAG;
+                memcpy(&image[start_row][0], buffer, CHUNK_SIZE * WIDTH * sizeof(int));
+                if (row < HEIGHT) {
+                    MPI_Send(&row, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
+                    row += CHUNK_SIZE;
+                    if (row > HEIGHT) row = HEIGHT;
+                }
+            }
+
+            // Terminate workers
+            int terminate = -1;
+            for (int i = 1; i < size; i++) {
+                MPI_Send(&terminate, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+            }
+
+            end_time = MPI_Wtime();
+            printf("Execution time: %f seconds\n", end_time - start_time);
+            save_pgm("mandelbrot.pgm", image);
+        }
+    } else { 
+        while (1) {
+            int start_row;
+            MPI_Recv(&start_row, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (start_row == -1) break; // Termination signal
+
+            int end_row = start_row + CHUNK_SIZE;
+            if (end_row > HEIGHT) end_row = HEIGHT;
+
+            int buffer[CHUNK_SIZE * WIDTH];
+            generate_mandelbrot(start_row, end_row, buffer);
+            MPI_Send(buffer, (end_row - start_row) * WIDTH, MPI_INT, 0, start_row, MPI_COMM_WORLD);
+        }
+    }
+
+    MPI_Finalize();
+    return 0;
+}
+
