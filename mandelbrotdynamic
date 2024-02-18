@@ -1,12 +1,17 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <mpi.h>
 #include <time.h>
+#include <string.h>
+
 
 #define WIDTH 640
 #define HEIGHT 480
 #define MAX_ITER 255
-#define CHUNK_SIZE 100
+#define WORK_REQUEST 1
+#define WORK_DONE 2
+#define NO_MORE_WORK 3
 
 struct complex {
     double real;
@@ -36,6 +41,7 @@ int cal_pixel(struct complex c) {
             return iter;
 
 }
+
 void generate_mandelbrot(int start_row, int end_row, int* chunk) {
     int i, j;
     int index = 0;
@@ -87,61 +93,63 @@ int main() {
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
     int image[HEIGHT][WIDTH];
+    struct complex c;
     double start_time, end_time;
 
-    if (rank == 0) { 
-        start_time = MPI_Wtime();
-        
+    if (rank == 0) { // Master process
+        start_time = MPI_Wtime(); // Start timer
+
+        // Dynamic task assignment to worker processes
         int row = 0;
+        for (int i = 1; i < size; i++) { // Initial distribution of rows
+            MPI_Send(&row, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+            row++;
+        }
+
+        // Receive results from workers and assign new rows
         while (row < HEIGHT) {
             MPI_Status status;
-            int buffer[CHUNK_SIZE * WIDTH];
-            
-            // Check for available workers and send them chunks
-            for (int i = 1; i < size && row < HEIGHT; i++) {
-                MPI_Send(&row, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-                row += CHUNK_SIZE;
-                if (row > HEIGHT) row = HEIGHT; // Adjust to not exceed HEIGHT
-            }
-
-            // Receive results from workers and assign new rows
-            for (int i = 1; i < size && row < HEIGHT; i++) {
-                MPI_Recv(buffer, CHUNK_SIZE * WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-                int start_row = status.MPI_TAG;
-                memcpy(&image[start_row][0], buffer, CHUNK_SIZE * WIDTH * sizeof(int));
-                if (row < HEIGHT) {
-                    MPI_Send(&row, 1, MPI_INT, status.MPI_SOURCE, 0, MPI_COMM_WORLD);
-                    row += CHUNK_SIZE;
-                    if (row > HEIGHT) row = HEIGHT;
-                }
-            }
-
-            // Terminate workers
-            int terminate = -1;
-            for (int i = 1; i < size; i++) {
-                MPI_Send(&terminate, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
-            }
-
-            end_time = MPI_Wtime();
-            printf("Execution time: %f seconds\n", end_time - start_time);
-            save_pgm("mandelbrot.pgm", image);
+            int buffer[WIDTH];
+            MPI_Recv(buffer, WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            int worker_rank = status.MPI_SOURCE;
+            memcpy(image[status.MPI_TAG], buffer, WIDTH * sizeof(int));
+            MPI_Send(&row, 1, MPI_INT, worker_rank, 0, MPI_COMM_WORLD);
+            row++;
         }
-    } else { 
+
+        // Terminate workers
+        for (int i = 1; i < size; i++) {
+            int terminate = -1;
+            MPI_Send(&terminate, 1, MPI_INT, i, 0, MPI_COMM_WORLD);
+        }
+
+        // Collect remaining results
+        for (int i = 1; i < size; i++) {
+            MPI_Status status;
+            int buffer[WIDTH];
+            MPI_Recv(buffer, WIDTH, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            memcpy(image[status.MPI_TAG], buffer, WIDTH * sizeof(int));
+        }
+
+        end_time = MPI_Wtime(); // Stop timer
+        printf("Execution time: %f seconds\n", end_time - start_time);
+
+        save_pgm("mandelbrot.pgm", image);
+    } else { // Worker processes
         while (1) {
-            int start_row;
-            MPI_Recv(&start_row, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            if (start_row == -1) break; // Termination signal
+            int row;
+            MPI_Recv(&row, 1, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (row == -1) break; // Termination signal
 
-            int end_row = start_row + CHUNK_SIZE;
-            if (end_row > HEIGHT) end_row = HEIGHT;
-
-            int buffer[CHUNK_SIZE * WIDTH];
-            generate_mandelbrot(start_row, end_row, buffer);
-            MPI_Send(buffer, (end_row - start_row) * WIDTH, MPI_INT, 0, start_row, MPI_COMM_WORLD);
+            for (int j = 0; j < WIDTH; j++) {
+                c.real = (j - WIDTH / 2.0) * 4.0 / WIDTH;
+                c.imag = (row - HEIGHT / 2.0) * 4.0 / HEIGHT;
+                image[row][j] = cal_pixel(c);
+            }
+            MPI_Send(image[row], WIDTH, MPI_INT, 0, row, MPI_COMM_WORLD);
         }
     }
 
     MPI_Finalize();
     return 0;
 }
-
